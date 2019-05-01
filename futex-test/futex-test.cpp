@@ -105,9 +105,18 @@ void line_test(int threadCount, int perfCount, int outOfBusyLoopCount)
 
 	auto timings = all_timings(threadCount, perfCount, outOfBusyLoopCount);
 
+	double min_time = 9999999999.0;
 	for(const auto& timing: timings) {
+		if (static_cast<double>(timing) < min_time && timing > 0.0) {
+			min_time = static_cast<double>(timing);
+		}
 		std::cout << timing << "; ";
 	}
+
+	for(const auto& timing: timings) {
+		std::cout << static_cast<double>(timing) / min_time << "; ";
+	}
+
 	std::cout << "\n";
 }
 
@@ -129,11 +138,12 @@ auto generate_tests()
 			{ 9800000, 20},
 			{ 9500000, 40},
 			{ 9000000, 80},
-			{ 8500000, 120}
+			{ 8500000, 120},
+			{ 8000000, 200},
 	};
 
 	for(const auto& parms: lparms) {
-		for(int threadCount = 1; threadCount < 16; ++threadCount){
+		for(int threadCount = 1; threadCount <= 16; ++threadCount){
 			tests.push_back({threadCount, parms.first/threadCount, parms.second});
 		}
 	}
@@ -146,8 +156,9 @@ int main(int, char*[])
 {
 	auto tests = generate_tests();
 
-	std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; \"Time Futex<0>\"; "
-			  << "\"Time Futex<1>\"; \"Time Futex<40>\"; \"Time std::mutex\";\n";
+	std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; "
+			  << "\"Time Futex<0>\"; \"Time Futex<1>\"; \"Time Futex<40>\"; \"Time std::mutex\"; "
+			  << "\"Rel Futex<0>\"; \"Rel Futex<1>\"; \"Rel Futex<40>\"; \"Rel std::mutex\";\n";
 	for(const auto& tp: tests) {
 		line_test(tp.threadCount, tp.perfCount, tp.outOfBusyLoopCount);
 	}

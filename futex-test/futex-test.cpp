@@ -7,6 +7,13 @@
 #include <vector>
 #include <iostream>
 
+#ifdef _MSC_VER
+#define NOOP __asm nop
+#else
+#define NOOP asm("");
+#endif
+
+
 
 template<unsigned int spinCount=0>
 class Futex {
@@ -23,11 +30,15 @@ public:
       unsigned int sc = spinCount;
       while(!m_owned.compare_exchange_weak(
             isOwned, true,
-            std::memory_order_acq_rel,
+            std::memory_order_release,
             std::memory_order_relaxed) || isOwned ) {
          isOwned = false;
 
-         if(spinCount && --sc == 0) {
+		 // This will be optimized into a Yield, noop or a proper
+		 if (spinCount == 1) {
+			 std::this_thread::yield();
+		 }
+         else if(spinCount && --sc == 0) {
             std::this_thread::yield();
          }
       }
@@ -36,10 +47,25 @@ public:
    void unlock() noexcept {
       m_owned.store(false, std::memory_order_release);
    }
+};
 
-   bool isLocked() noexcept {
-      return m_owned.load(std::memory_order_acquire);
-   }
+template<class _Mutex>
+int check_func(_Mutex& mutex, int perfCount, int outOfBusyLoopCount) {
+	volatile int counter = 0;
+	volatile int dummy = 1;
+	for (int i = 0; i < perfCount; ++i) {
+		// Simulate some out of the main loop operation
+		for (int j = 0; j < outOfBusyLoopCount; ++j) {
+			++dummy;
+			NOOP
+		}
+
+		std::lock_guard guard(mutex);
+		++counter;
+		NOOP
+	}
+
+	return counter;
 };
 
 
@@ -48,24 +74,19 @@ auto performance_test(_Mutex& mutex, int threadCount, int perfCount, int outOfBu
 {
 	auto now = std::chrono::high_resolution_clock::now();
 
-	volatile int counter = 0;
-	auto check = [&](){
-	  int dummy = 1;
-	  for(int i = 0; i < perfCount; ++i) {
-		 // Simulate some out of the main loop operation
-		 for(int j = 0; j < outOfBusyLoopCount; ++j) {
-			++ dummy;
-		 }
-		 std::lock_guard guard(mutex);
-		 ++counter;
-	  }
-	};
-
-
    // Thread launcher
    std::vector<std::thread> threads;
    for (int i = 0; i < threadCount; ++i) {
-      threads.emplace_back(check);
+	   threads.emplace_back(
+		   [&]() {
+			   int counter = check_func(mutex, perfCount, outOfBusyLoopCount);
+			   // this should ensure we're not killing the busy loops
+			   if (counter != perfCount)
+			   {
+				   throw std::runtime_error("Lock failed");
+			   }
+		   }
+	   );
    }
 
    // Waiting for threads to be done
@@ -133,13 +154,14 @@ auto generate_tests()
 {
 	std::vector<test_params> tests;
 	std::vector<std::pair<int, int>> lparms = {
-			{10000000, 0},
-			{10000000, 5},
-			{ 9800000, 20},
-			{ 9500000, 40},
-			{ 9000000, 80},
-			{ 8500000, 120},
-			{ 8000000, 200},
+			{100000000, 0},
+			{100000000, 5},
+			{ 98000000, 20},
+			{ 95000000, 40},
+			{ 90000000, 80},
+			{ 85000000, 120},
+			{ 70000000, 200},
+			{ 40000000, 1000},
 	};
 
 	for(const auto& parms: lparms) {

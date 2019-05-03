@@ -13,6 +13,9 @@
 #define NOOP asm("");
 #endif
 
+enum {
+   DRY_RUN=0xFFFFFFFF,
+};
 
 
 template<unsigned int spinCount=0>
@@ -26,9 +29,9 @@ public:
    ~Futex() {}
 
    void lock() noexcept {
-	  if (spinCount < 0) {
-		   return;
-	  }
+      if (spinCount == DRY_RUN) {
+         return;
+      }
 
       bool isOwned = false;
       unsigned int sc = spinCount;
@@ -49,9 +52,9 @@ public:
    }
 
    void unlock() noexcept {
-	  if (spinCount < 0) {
-		   return;
-	  }
+      if (spinCount == DRY_RUN) {
+         return;
+      }
       m_owned.store(false, std::memory_order_release);
    }
 };
@@ -106,33 +109,38 @@ auto performance_test(_Mutex& mutex, int threadCount, int perfCount, int outOfBu
 }
 
 
-auto all_timings(int threadCount, int perfCount, int outOfBusyLoopCount)
+auto all_timings(bool dry_run, int threadCount, int perfCount, int outOfBusyLoopCount)
 {
-	Futex<-1> dry;
+	Futex<DRY_RUN> dry;
 	Futex<0> futex;
 	Futex<1> yield_futex;
 	Futex<40> sl_futex;
 	std::mutex mutex;
 
-	std::vector timings = {
-		performance_test(dry, threadCount, perfCount, outOfBusyLoopCount),
-		performance_test(futex, threadCount, perfCount, outOfBusyLoopCount),
-		performance_test(yield_futex, threadCount, perfCount, outOfBusyLoopCount),
-		performance_test(sl_futex, threadCount, perfCount, outOfBusyLoopCount),
-		performance_test(mutex, threadCount, perfCount, outOfBusyLoopCount)
-	};
+	std::vector<long long> timings;
+	if (dry_run) {
+           timings = {performance_test(dry, threadCount, perfCount, outOfBusyLoopCount),};
+	}
+        else {
+	   timings = {
+              performance_test(futex, threadCount, perfCount, outOfBusyLoopCount),
+              performance_test(yield_futex, threadCount, perfCount, outOfBusyLoopCount),
+              performance_test(sl_futex, threadCount, perfCount, outOfBusyLoopCount),
+	      performance_test(mutex, threadCount, perfCount, outOfBusyLoopCount)
+	   };
+        }
 
 	return timings;
 }
 
 
-void line_test(int threadCount, int perfCount, int outOfBusyLoopCount)
+void line_test(bool dry_run, int threadCount, int perfCount, int outOfBusyLoopCount)
 {
 	std::cout << threadCount << "; "
 			  << perfCount << "; "
 			  << outOfBusyLoopCount << "; " << std::flush;
 
-	auto timings = all_timings(threadCount, perfCount, outOfBusyLoopCount);
+	auto timings = all_timings(dry_run, threadCount, perfCount, outOfBusyLoopCount);
 
 	double min_time = 9999999999.0;
 	for(const auto& timing: timings) {
@@ -182,15 +190,22 @@ auto generate_tests()
 }
 
 
-int main(int, char*[])
+int main(int argc, char*[])
 {
 	auto tests = generate_tests();
 
-	std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; \"Baseline\"; "
+	if(argc == 1) {
+		std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; "
 			  << "\"Time Futex<0>\"; \"Time Futex<1>\"; \"Time Futex<40>\"; \"Time std::mutex\"; "
 			  << "\"Rel Futex<0>\"; \"Rel Futex<1>\"; \"Rel Futex<40>\"; \"Rel std::mutex\";\n";
+	}
+	else {
+		std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; \"Baseline\";\n";
+	
+	}
+
 	for(const auto& tp: tests) {
-		line_test(tp.threadCount, tp.perfCount, tp.outOfBusyLoopCount);
+		line_test(argc > 1, tp.threadCount, tp.perfCount, tp.outOfBusyLoopCount);
 	}
 	return 0;
 }

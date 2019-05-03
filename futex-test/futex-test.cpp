@@ -26,6 +26,10 @@ public:
    ~Futex() {}
 
    void lock() noexcept {
+	  if (spinCount < 0) {
+		   return;
+	  }
+
       bool isOwned = false;
       unsigned int sc = spinCount;
       while(!m_owned.compare_exchange_weak(
@@ -45,6 +49,9 @@ public:
    }
 
    void unlock() noexcept {
+	  if (spinCount < 0) {
+		   return;
+	  }
       m_owned.store(false, std::memory_order_release);
    }
 };
@@ -101,13 +108,14 @@ auto performance_test(_Mutex& mutex, int threadCount, int perfCount, int outOfBu
 
 auto all_timings(int threadCount, int perfCount, int outOfBusyLoopCount)
 {
-
+	Futex<-1> dry;
 	Futex<0> futex;
 	Futex<1> yield_futex;
 	Futex<40> sl_futex;
 	std::mutex mutex;
 
 	std::vector timings = {
+		performance_test(dry, threadCount, perfCount, outOfBusyLoopCount),
 		performance_test(futex, threadCount, perfCount, outOfBusyLoopCount),
 		performance_test(yield_futex, threadCount, perfCount, outOfBusyLoopCount),
 		performance_test(sl_futex, threadCount, perfCount, outOfBusyLoopCount),
@@ -178,7 +186,7 @@ int main(int, char*[])
 {
 	auto tests = generate_tests();
 
-	std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; "
+	std::cout << "\"Threads\"; \"Iterations\"; \"Non-contended Loops\"; \"Baseline\"; "
 			  << "\"Time Futex<0>\"; \"Time Futex<1>\"; \"Time Futex<40>\"; \"Time std::mutex\"; "
 			  << "\"Rel Futex<0>\"; \"Rel Futex<1>\"; \"Rel Futex<40>\"; \"Rel std::mutex\";\n";
 	for(const auto& tp: tests) {

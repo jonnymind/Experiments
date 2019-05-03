@@ -6,6 +6,8 @@
 #include <thread>
 #include <vector>
 #include <iostream>
+#include <sstream>
+
 
 #ifdef _MSC_VER
 #define NOOP __asm nop
@@ -15,6 +17,7 @@
 
 enum {
    DRY_RUN=0xFFFFFFFF,
+   CHANGE_COUNT=0x10
 };
 
 
@@ -57,44 +60,52 @@ public:
       }
       m_owned.store(false, std::memory_order_release);
    }
+   
+   unsigned int get_spin() const { return spinCount; }
 };
 
-template<class _Mutex>
-int check_func(_Mutex& mutex, int perfCount, int outOfBusyLoopCount) {
-	volatile int counter = 0;
+template<class mutex_type>
+void check_func(std::vector<int>& shared_data, mutex_type& mutex, int perfCount, int outOfBusyLoopCount) {
 	volatile int dummy = 1;
+
 	for (int i = 0; i < perfCount; ++i) {
 		// Simulate some out of the main loop operation
 		for (int j = 0; j < outOfBusyLoopCount; ++j) {
 			++dummy;
 			NOOP
 		}
-
-		std::lock_guard<_Mutex> guard(mutex);
-		++counter;
-		NOOP
+		
+		std::lock_guard<mutex_type> guard(mutex);
+    	for(int pos = 0; pos < shared_data.size(); pos += shared_data.size()/CHANGE_COUNT) {
+            shared_data[pos]++;
+        }
 	}
-
-	return counter;
 };
 
 
-template<class _Mutex>
-auto performance_test(_Mutex& mutex, int threadCount, int perfCount, int outOfBusyLoopCount)
+long long checkSharedData(std::vector<int>& shared_data)
+{
+    long long count = 0;
+    for(int pos = 0; pos < shared_data.size(); pos += shared_data.size()/CHANGE_COUNT) {
+        count += shared_data[pos];
+    }
+    return count;
+}
+
+
+template<class mutex_type>
+auto performance_test(bool dry, mutex_type& mutex, int threadCount, int perfCount, int outOfBusyLoopCount)
 {
 	auto now = std::chrono::high_resolution_clock::now();
 
+    std::vector<int> shared_data(0x100000);
+	
    // Thread launcher
    std::vector<std::thread> threads;
    for (int i = 0; i < threadCount; ++i) {
 	   threads.emplace_back(
 		   [&]() {
-			   int counter = check_func(mutex, perfCount, outOfBusyLoopCount);
-			   // this should ensure we're not killing the busy loops
-			   if (counter != perfCount)
-			   {
-				   throw std::runtime_error("Lock failed");
-			   }
+			check_func(shared_data, mutex, perfCount, outOfBusyLoopCount);
 		   }
 	   );
    }
@@ -105,6 +116,18 @@ auto performance_test(_Mutex& mutex, int threadCount, int perfCount, int outOfBu
    }
 
    auto after = std::chrono::high_resolution_clock::now();
+   
+   // this will ensure memory coherency
+   long long fullCount = checkSharedData(shared_data);
+   long long paragon = static_cast<long long>(perfCount) * 
+                        static_cast<long long>(threadCount) * CHANGE_COUNT;
+                        
+   if (!dry && fullCount != paragon)
+   {
+       std::ostringstream ss;
+       ss << "Lock failed: " << fullCount << "/" << paragon;
+       throw std::runtime_error(ss.str().c_str());
+   }
    return std::chrono::duration_cast<std::chrono::milliseconds>(after - now).count();
 }
 
@@ -114,19 +137,19 @@ auto all_timings(bool dry_run, int threadCount, int perfCount, int outOfBusyLoop
 	Futex<DRY_RUN> dry;
 	Futex<0> futex;
 	Futex<1> yield_futex;
-	Futex<40> sl_futex;
+	Futex<0x40> sl_futex;
 	std::mutex mutex;
 
 	std::vector<long long> timings;
 	if (dry_run) {
-           timings = {performance_test(dry, threadCount, perfCount, outOfBusyLoopCount),};
+           timings = {performance_test(true, dry, threadCount, perfCount, outOfBusyLoopCount),};
 	}
         else {
 	   timings = {
-              performance_test(futex, threadCount, perfCount, outOfBusyLoopCount),
-              performance_test(yield_futex, threadCount, perfCount, outOfBusyLoopCount),
-              performance_test(sl_futex, threadCount, perfCount, outOfBusyLoopCount),
-	      performance_test(mutex, threadCount, perfCount, outOfBusyLoopCount)
+          performance_test(false, futex, threadCount, perfCount, outOfBusyLoopCount),
+          performance_test(false, yield_futex, threadCount, perfCount, outOfBusyLoopCount),
+          performance_test(false, sl_futex, threadCount, perfCount, outOfBusyLoopCount),
+	      performance_test(false, mutex, threadCount, perfCount, outOfBusyLoopCount)
 	   };
         }
 
@@ -170,14 +193,14 @@ auto generate_tests()
 {
 	std::vector<test_params> tests;
 	std::vector<std::pair<int, int>> lparms = {
-			{100000000, 0},
-			{100000000, 5},
-			{ 98000000, 20},
-			{ 95000000, 40},
-			{ 90000000, 80},
-			{ 85000000, 120},
-			{ 70000000, 200},
-			{ 40000000, 1000},
+			{10000000, 0},
+			{1000000, 50},
+			{ 980000, 200},
+			{ 950000, 400},
+			{ 900000, 800},
+			{ 850000, 1200},
+			{ 700000, 2000},
+			{ 400000, 10000},
 	};
 
 	for(const auto& parms: lparms) {

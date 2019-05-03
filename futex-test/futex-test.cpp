@@ -70,7 +70,7 @@ int check_func(_Mutex& mutex, int perfCount, int outOfBusyLoopCount) {
 			NOOP
 		}
 
-		std::lock_guard guard(mutex);
+		std::lock_guard<_Mutex> guard(mutex);
 		++counter;
 		NOOP
 	}

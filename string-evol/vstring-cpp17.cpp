@@ -1,15 +1,11 @@
-// Variant String in C++98 style
+// Variant String in C++17 style
 
 #include <string>
 #include <stdexcept>
 #include <iostream>
 #include <iomanip>
-
-// C++98 didn't have unsigned integral types a pre-defined.
-// In this test, I use define to bypass the C++11 behavior
-#define uint16_t unsigned short int 
-#define uint32_t unsigned int 
-
+#include <functional>
+#include <memory>
 
 /**
    String with variable internal storage size.
@@ -31,7 +27,7 @@ class VariantString
 public:
     class StringConcept  {
     public:
-        virtual ~StringConcept() {}
+        virtual ~StringConcept() = default;
         virtual size_t char_size() const = 0;
         virtual size_t size() const = 0;
         virtual void resize (size_t n) =0;
@@ -50,11 +46,12 @@ public:
     template<typename BaseString>
     class StringModel: public StringConcept {
     public:
-        StringModel(): m_base( new BaseString ) {}
-        StringModel(const StringModel& other): m_base( new BaseString(*other.m_base) ) {}
-        StringModel( const BaseString& source ): m_base( new BaseString(source) ) {}
-        StringModel(BaseString* base): m_base(base) {}
-        virtual ~StringModel() { delete m_base; }
+        StringModel(): m_base( std::make_unique<BaseString>()  ) {}
+        StringModel(const StringModel& other): m_base{std::make_unique<BaseString>(*other.m_base)} {}
+        StringModel(StringModel&& other) noexcept: m_base{std::move(other.m_base)} {}
+        StringModel(const BaseString& source): m_base{std::make_unique<BaseString>(source)} {}
+        StringModel(BaseString* base): m_base{base} {}
+        virtual ~StringModel() = default;
 
         virtual size_t char_size() const { return sizeof(typename BaseString::value_type); }
         virtual size_t size() const { return m_base->size(); }
@@ -69,39 +66,44 @@ public:
         virtual void push_back(uint32_t v) { m_base->push_back(static_cast<typename BaseString::value_type>(v)); }
 
     private: 
-       BaseString* m_base;
+       std::unique_ptr<BaseString> m_base;
     };
 
-    template<class VStr, bool fwd>
+    // Lambda used as template parameters with decltype!
+    static constexpr auto incrementor = [](size_t a, size_t b) -> size_t{ return a + b; };
+    static constexpr auto decrementor = [](size_t a, size_t b) -> size_t{ return a - b; };
+
+    template<class VStr, class incrF>
     class iterator {
     public:
-        iterator(VStr& owner, size_t pos=0): m_owner(owner), m_pos(pos), m_chr(0) {}
-        iterator(const iterator& other): m_owner(other.m_owner), m_pos(0), m_chr(0) {}
-        iterator& operator++() { if (fwd){++m_pos;} else{--m_pos;} return *this; }
-        iterator& operator--() { if (fwd){--m_pos;} else{++m_pos;} return *this; }
+        iterator(VStr& owner, incrF f, size_t pos=0) noexcept: m_owner(owner), m_pos(pos), m_incr(f) {}
+        iterator(const iterator& other) noexcept: m_owner(other.m_owner), m_pos(other.m_pos), m_incr(other.m_incr){}
+        iterator& operator++() { m_pos = m_incr(m_pos, 1); return *this; }
+        iterator& operator--() { m_pos = m_incr(m_pos, 1); return *this; }
         uint32_t& operator*() { m_chr = m_owner.get_at(m_pos); return m_chr; }
-        iterator operator+(int count) const {if(!fwd){count = -count;} return iterator<VStr, fwd>(m_owner, m_pos + count); }
-        iterator operator-(int count) const {if(!fwd){count = -count;} return iterator<VStr, fwd>(m_owner, m_pos - count); }
-        iterator operator+=(int count) {if(!fwd){count = -count;} m_pos += count; return *this; }
-        iterator operator-=(int count) {if(!fwd){count = -count;} m_pos -= count; return *this; }
+        iterator operator+(int count) const { return iterator(m_owner, m_incr, m_incr(m_pos, count)); }
+        iterator operator-(int count) const { return iterator(m_owner, m_incr, m_incr(m_pos, -count)); }
+        iterator operator+=(int count) { m_pos = m_incr(m_pos, count); return *this; }
+        iterator operator-=(int count) {m_pos = m_incr(m_pos, -count); return *this; }
         bool operator==(const iterator& other) const { return other.m_pos == m_pos && &other.m_owner == &m_owner; }
         bool operator<(const iterator& other) const { return other.m_pos < m_pos && &other.m_owner == &m_owner; }
         bool operator!=(const iterator& other) const {return ! (*this == other); }
     private:
-        mutable uint32_t m_chr;
-        size_t m_pos;
         VStr& m_owner;
+        size_t m_pos{0};
+        mutable uint32_t m_chr{0};
+        incrF m_incr;
     };
 
     static StringConcept* make_properly_fitted_string(size_t char_size)
     {
         switch ( char_size ) {
         case sizeof( uint32_t ) :
-            return new StringModel<std::basic_string<uint32_t, std::char_traits<uint32_t>, std::allocator<uint32_t> > >;
+            return new StringModel<std::u32string>;
         case sizeof( uint16_t ) :
-            return new StringModel<std::basic_string<uint16_t, std::char_traits<uint16_t>, std::allocator<uint16_t> > >;
+            return new StringModel<std::u16string>;
         case sizeof( char ) :
-            return new StringModel < std::string >;
+            return new StringModel<std::string>;
         }
         throw std::invalid_argument( "Unknown char size" );
     }
@@ -111,8 +113,7 @@ public:
         for ( size_t pos = 0; pos < model->size(); ++pos ) {
             model->set_at( pos, m_string->get_at( pos ) );
         }
-        delete m_string;
-        m_string = model;
+        m_string.reset(model);
     }
 
     void refit( size_t char_size ) {
@@ -174,38 +175,43 @@ public:
 
     friend std::ostream& operator<<(std::ostream& out, const VariantString& str);
 
-    StringConcept* m_string;
+    std::unique_ptr<StringConcept> m_string;
 public:
-    VariantString(): m_string(new StringModel<std::string>()) {}
-    VariantString(const VariantString& other): m_string(other.m_string->clone()) {}
-    VariantString(size_t prealloc, size_t char_size=1): m_string(0) {
-        m_string = make_properly_fitted_string(char_size);
+    VariantString(): m_string{std::make_unique<StringModel<std::string>>()} {}
+    VariantString(const VariantString& other): m_string{other.m_string->clone()} {}
+    VariantString(VariantString&& other) noexcept: m_string{std::move(other.m_string)} {
+        std::cout << "Move constructor called\n";
+        other.m_string = 0;
+    }
+    VariantString(size_t prealloc, size_t char_size=1): 
+        m_string{make_properly_fitted_string(char_size)} 
+    {
         m_string->reserve(prealloc);
     }
-    ~VariantString() { delete m_string; }
+    ~VariantString() = default;
 
     template<typename CharT>
     VariantString(const CharT* s):
-        m_string( new StringModel<std::basic_string<CharT, std::char_traits<CharT>, std::allocator<CharT > > >() )
+        m_string{ std::make_unique<StringModel<std::basic_string<CharT>>>()}
     {
         copy_from_chars(s);
     }
 
     template<typename CharT>
-    VariantString(const std::basic_string<CharT, std::char_traits<CharT>, std::allocator<CharT> >& s):
-        m_string(new StringModel<std::basic_string<CharT, std::char_traits<CharT>, std::allocator<CharT > > >() )
+    VariantString(const std::basic_string<CharT>& s):
+        m_string{std::make_unique<StringModel<decltype(s)>>()}
     {
         *m_string = s;
     }
 
-    // we offer the const interator only
-    typedef iterator<const VariantString, true> const_iterator;
-    typedef iterator<const VariantString, false> const_riterator;
+    // we offer the const interator only    
+    using const_iterator = iterator<const VariantString, decltype(incrementor)>;
+    using const_riterator = iterator<const VariantString, decltype(decrementor)>;
 
-    const_iterator begin() const {return const_iterator(*this);}
-    const_iterator end() const {return const_iterator(*this, size());}
-    const_riterator rbegin() const {return const_riterator(*this, size()-1);}
-    const_riterator rend() const {return const_riterator(*this, std::string::npos);}
+    const_iterator begin() const {return const_iterator(*this, incrementor);}
+    const_iterator end() const {return const_iterator(*this, incrementor, size());}
+    const_riterator rbegin() const {return const_riterator(*this, decrementor, size()-1);}
+    const_riterator rend() const {return const_riterator(*this, decrementor, std::string::npos);}
 
     // be kind and forward npos
     enum {npos = std::string::npos};
@@ -228,8 +234,7 @@ public:
 
     VariantString& operator=( const VariantString& other ) {
         if(&other != this) {
-            delete m_string;
-            m_string = other.m_string->clone();
+            m_string.reset(other.m_string->clone());
         }
         return *this;
     }
@@ -265,13 +270,10 @@ public:
     }
 
     template<typename StringT>
-    VariantString& operator+=(const StringT& other) {
-        for(typename StringT::const_iterator iter = other.begin(); iter != other.end(); ++iter) {
-            push_back(*iter);
-        }
+    VariantString& operator+=(const StringT& other) { 
+        for(auto chr: other) { push_back(chr); } 
         return *this;
     }
-    
     VariantString& operator+=(const char* other) {
         while(*other) {
             push_back(*other);
@@ -286,8 +288,8 @@ public:
     template<typename StringT>
     VariantString operator +(const StringT& other) {
         VariantString nstr(*this);
-        for(typename StringT::const_iterator iter = other.begin(); iter != other.end(); ++iter) {
-            nstr.push_back(*iter);
+        for(auto chr: other) {
+            nstr.push_back(chr);
         }
         return nstr;
     }
@@ -318,8 +320,8 @@ public:
 };
 
 std::ostream& operator<<(std::ostream& out, const VariantString& str) {
-    for(VariantString::const_iterator iter = str.begin(); iter != str.end(); ++iter) {
-        VariantString::toUtf8(out, *iter);
+    for(auto chr: str) {
+        VariantString::toUtf8(out, chr);
     }
     return out;
 }
@@ -329,16 +331,24 @@ void inspect_string(const VariantString& utf_str) {
     std::cout << "Values in \"" << utf_str 
                 << "\" length: " << utf_str.size() 
                 << "; char-size: " << utf_str.char_size() << "\n";
-    std::ios state(0);
+    std::ios state(nullptr);
     state.copyfmt(std::cout);
     VariantString empty;
-    int count = 0;
-
-    for(VariantString::const_iterator iter = utf_str.begin(); iter != utf_str.end(); ) {
-        std::cout << "U+" << std::hex << std::setw(4) << *iter << ": " << (empty + *iter)
-            << ((((++count%8) != 0) && (++iter != utf_str.end())) ? ", " : "\n");
+    int count = -1;
+    
+    for(auto chr: utf_str) {
+        if(++count) {
+            std::cout << ((count % 8 == 0)? "\n" : ", ");
+        }
+        std::cout << "U+" << std::hex << std::setw(4) << chr << ": " << (empty + chr);
     }
+    std::cout << "\n";
     std::cout.copyfmt(state);
+}
+
+VariantString trivial_pass(VariantString a)
+{
+    return a;
 }
 
 int main() {
@@ -371,4 +381,7 @@ int main() {
               << empty + utf_str2[17] << '\n';
     utf_str2.resize(18);
     std::cout << utf_str2 << "<<< cut here\n";
+
+    VariantString vmoved("Testing the move constructor");
+    std::cout << trivial_pass(vmoved) << '\n';
 }
